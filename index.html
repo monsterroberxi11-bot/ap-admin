@@ -340,6 +340,14 @@ main{padding:12px 12px 90px; max-width:900px; margin:0 auto;}
 .tile:disabled{opacity:.45; cursor:not-allowed;}
 .tile .name{font-weight:800; font-size:14.5px;}
 .tile .rate{font-size:12.5px; color:var(--muted);}
+/* ごほうびカタログ：値段を大きく。押せない理由（あと◯分など）を小さく */
+.tile.catalog .price{font-size:18px; font-weight:800; color:var(--primary-dark);}
+.tile.catalog .why{font-size:12px; font-weight:700; color:var(--minus);}
+
+/* ── 家族ランキング ───────────────── */
+.rank-row .rank-no{flex:0 0 44px; text-align:center; font-size:22px; font-weight:800; color:var(--muted);}
+.rank-row .val{font-size:18px; font-weight:800;}
+.rank-row.me{border-color:var(--primary); background:var(--primary-soft);}
 
 /* ── リスト ───────────────── */
 .list{display:flex; flex-direction:column; gap:6px;}
@@ -606,6 +614,10 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--primary); outlin
       <h2>交換する</h2>
       <div id="rewardList" class="tile-grid"></div>
     </div>
+    <div class="card" id="catalogCard">
+      <h2>🎁 ごほうびカタログ</h2>
+      <div id="catalogList" class="tile-grid"></div>
+    </div>
     <div class="card">
       <h2>承認待ち</h2>
       <div id="pendingList" class="list"></div>
@@ -627,6 +639,12 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--primary); outlin
 
   <!-- 分析 -->
   <section id="view-analysis" class="view hidden">
+    <div class="card" id="rankingCard">
+      <h2>🏆 家族ランキング</h2>
+      <div class="member-seg small" id="rkKind"></div>
+      <div class="member-seg small" id="rkPeriod"></div>
+      <div id="ranking" class="list"></div>
+    </div>
     <div class="member-seg" id="anMembers"></div>
     <div class="member-seg small" id="anDays"></div>
     <div id="analysis"></div>
@@ -734,7 +752,7 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--primary); outlin
 /* インストール版（PWA）のときは build-pwa.js がここにGASのURLを入れる。
    GASのWebアプリとして開いたときは空のまま → google.script.run を使う */
 const API_URL = "https://script.google.com/macros/s/AKfycbwYVPlYAM3Xel3O8NP3bErPGCtzW9Mua5WtuWhOv6VHIaDDmb_oT354htcyXW-SFjgboQ/exec";
-/* 管理者パネルだけのアプリ（build-pwa.js --admin → pwa/admin/）では true になる */
+/* 管理者パネルだけのアプリ（build-pwa.js --admin → pwa-admin/ → GitHub の ap-admin）では true になる */
 const ADMIN_APP = true;
 
 /* Routine Bank Offline（build-pwa.js --home）では、サーバーの処理（Code.gs）をこのページの中で動かす。
@@ -811,7 +829,7 @@ const S = {
   view: 'timer',
   bankMember: '',       // 貯金タブで見ている人
   ginkoMember: '',      // 銀行タブで見ている人
-  anMember: '', anDays: 7,
+  anMember: '', anDays: 7, rkKind: 'saved', rkPeriod: 'week',
   parentPin: '',        // 親のPIN（確認済みのものをこの画面を開いている間だけ覚える）
   pinFor: ''            // そのPINがどの親のものか
 };
@@ -1011,7 +1029,7 @@ function switchView(key){
   if (key === 'timer') renderTimerView();
   if (key === 'bank') renderBank();
   if (key === 'ginko') atmGo('menu');
-  if (key === 'analysis') renderAnalysis();
+  if (key === 'analysis'){ renderRanking(); renderAnalysis(); }
   if (key === 'settings') renderSettings();
 }
 
@@ -1722,11 +1740,12 @@ async function renderBank(){
     '</div>';
 
   const canUse = m.id === S.me && b.balanceSec >= 60;
-  document.getElementById('rewardList').innerHTML = S.rewards.filter(function(w){ return w.active; }).map(function(w){
+  document.getElementById('rewardList').innerHTML = S.rewards.filter(function(w){ return w.active && w.kind !== 'catalog'; }).map(function(w){
     return '<button class="tile" ' + (canUse ? '' : 'disabled') + ' onclick="openExchange(\'' + w.id + '\')">' +
       '<span class="name">' + esc(w.name) + '</span><span class="rate">1分 → ' + fmtNum(w.perMin) + esc(w.unit) + '</span></button>';
   }).join('') || '<p class="empty">交換先がありません</p>';
   if (m.id !== S.me) document.getElementById('rewardList').insertAdjacentHTML('beforeend', '<p class="muted" style="grid-column:1/-1;margin:0">交換の申請は本人の端末からできます</p>');
+  renderCatalog_(m, b);
 
   ['pendingList', 'exchangeList', 'runList'].forEach(function(id){
     document.getElementById(id).innerHTML = '<p class="empty">読み込み中…</p>';
@@ -1744,6 +1763,52 @@ async function renderBank(){
 }
 
 function pickBankMember(id){ S.bankMember = id; renderBank(); }
+
+/** ごほうびカタログ（決まった値段のもの）。売り切れ・今週の回数を使い切った・貯金が足りないものは押せない */
+function catalogState_(w, memberId, balanceSec){
+  const weekLeft = w.weekLimit ? Math.max(0, w.weekLimit - (w.weekUsed[memberId] || 0)) : null;
+  let why = '';
+  if (w.stockLeft === 0) why = '売り切れ';
+  else if (weekLeft === 0) why = '今週はもうおしまい';
+  else if (balanceSec < w.priceMin * 60) why = 'あと' + Math.ceil((w.priceMin * 60 - Math.max(balanceSec, 0)) / 60) + '分';
+  return { weekLeft: weekLeft, why: why };
+}
+
+function renderCatalog_(m, b){
+  const items = S.rewards.filter(function(w){ return w.active && w.kind === 'catalog'; });
+  show('catalogCard', items.length > 0);
+  document.getElementById('catalogList').innerHTML = items.map(function(w){
+    const st = catalogState_(w, m.id, b.balanceSec);
+    const tags = [];
+    if (w.stockLeft != null) tags.push(w.stockLeft ? 'のこり' + w.stockLeft + '個' : '売り切れ');
+    if (st.weekLeft) tags.push('今週あと' + st.weekLeft + '回');
+    return '<button class="tile catalog' + (st.why ? ' off' : '') + '" ' + (m.id === S.me && !st.why ? '' : 'disabled') +
+      ' onclick="openCatalog(\'' + w.id + '\')"><span class="name">' + esc(w.name) + '</span>' +
+      '<span class="price">' + w.priceMin + '分</span>' +
+      (tags.length ? '<span class="rate">' + tags.join('・') + '</span>' : '') +
+      (st.why && st.why !== '売り切れ' ? '<span class="why">' + esc(st.why) + '</span>' : '') + '</button>';
+  }).join('');
+  if (items.length && m.id !== S.me) document.getElementById('catalogList').insertAdjacentHTML('beforeend', '<p class="muted" style="grid-column:1/-1;margin:0">交換の申請は本人の端末からできます</p>');
+}
+
+function openCatalog(rewardId){
+  const w = S.rewards.filter(function(x){ return x.id === rewardId; })[0];
+  const left = bal_(S.me).balanceSec - w.priceMin * 60;
+  openModal({
+    title: '🎁 ' + w.name + 'と交換',
+    body: '<p style="font-size:18px;font-weight:800;margin:0 0 6px">' + w.priceMin + '分 → ' + esc(w.name) + ' 1個</p>' +
+      '<p class="muted">交換すると、のこりの時間貯金は ' + fmtDur(left) + '。親が承認したら決まります。</p>' +
+      '<div class="form"><label>メモ（なくてもOK）<input type="text" id="exMemo" maxlength="100" placeholder="例：土曜日に食べたい"></label></div>',
+    ok: '申請する',
+    onOk: async function(){
+      const res = await gs('requestExchange', { token: S.token, memberId: S.me, rewardId: w.id, memo: val('exMemo') });
+      S.balances = res.balances;
+      S.rewards = res.rewards;
+      toast(res.message, 'ok');
+      renderBank();
+    }
+  });
+}
 
 /* ── 銀行タブ（ATMのように操作する）─────────────────────────
    メニュー（預け入れ・引き出し・残高照会）→ キャッシュカードを入れる → 暗証番号 → 金額 → 確認 → 明細。
@@ -2161,6 +2226,7 @@ function openExchange(rewardId){
     onOk: async function(){
       const res = await gs('requestExchange', { token: S.token, memberId: S.me, rewardId: w.id, minutes: Number(val('exMin')), memo: val('exMemo') });
       S.balances = res.balances;
+      S.rewards = res.rewards;
       toast(res.message, 'ok');
       renderBank();
     }
@@ -2171,6 +2237,7 @@ async function cancelExchange(id){
   try{
     const res = await gs('cancelExchange', { token: S.token, requestId: id });
     S.balances = res.balances;
+    S.rewards = res.rewards;
     toast(res.message, 'ok');
     renderBank();
   }catch(err){ toastErr(err); }
@@ -2183,6 +2250,7 @@ async function decide(id, approve){
     try{
       const res = await gs('decideExchange', { token: S.token, actorId: S.me, pin: pin, requestId: id, approve: approve, reason: reason || '' });
       S.balances = res.balances;
+      S.rewards = res.rewards;
       toast(res.message, 'ok');
       renderBank();
     }catch(err){ pinFailed_(err); toastErr(err); }
@@ -2261,6 +2329,42 @@ function modeStat_(label, m){
   return '<div class="stat"><div class="k">' + label + '</div><div class="v ' + (m.count ? sign_(m.avgSaved) : '') + '">' +
     (m.count ? fmtSigned(m.avgSaved) : '—') + '</div><div class="muted">' + m.count + '回</div></div>';
 }
+/* ── 家族ランキング（分析タブのいちばん上）── */
+const RANK_KINDS = [
+  { key: 'saved',  label: '💰 ためた時間' },
+  { key: 'streak', label: '🔥 連続記録' },
+  { key: 'fast',   label: '⚡ 速かった割合' }
+];
+async function renderRanking(){
+  document.getElementById('rkKind').innerHTML = RANK_KINDS.map(function(k){
+    return '<button class="' + (S.rkKind === k.key ? 'active' : '') + '" onclick="pickRkKind(\'' + k.key + '\')">' + k.label + '</button>';
+  }).join('');
+  // 連続記録は期間に関係ないので、今週・今月は出さない
+  show('rkPeriod', S.rkKind !== 'streak');
+  document.getElementById('rkPeriod').innerHTML = [['week', '今週'], ['month', '今月']].map(function(p){
+    return '<button class="' + (S.rkPeriod === p[0] ? 'active' : '') + '" onclick="pickRkPeriod(\'' + p[0] + '\')">' + p[1] + '</button>';
+  }).join('');
+  const box = document.getElementById('ranking');
+  box.innerHTML = '<p class="empty">読み込み中…</p>';
+  const kind = S.rkKind, seq = (S.rkSeq = (S.rkSeq || 0) + 1);
+  let r;
+  try{ r = await gs('getRanking', { token: S.token, period: S.rkPeriod }); }
+  catch(err){ box.innerHTML = ''; toastErr(err); return; }
+  if (seq !== S.rkSeq) return;   // 読み込み中に切りかえた
+  const medal = { 1: '🥇', 2: '🥈', 3: '🥉' };
+  box.innerHTML = r[kind].map(function(x){
+    let v, sub = '';
+    if (kind === 'saved'){ v = '<div class="val ' + sign_(x.sec) + '">' + fmtSigned(x.sec) + '</div>'; }
+    else if (kind === 'fast'){ v = '<div class="val">' + Math.round(x.rate * 100) + '%</div>'; sub = x.steps + 'こ中 ' + x.fast + 'こ'; }
+    else { v = '<div class="val">' + x.current + '日</div>'; sub = '最高 ' + x.best + '日' + (x.today ? '・今日やった' : ''); }
+    return '<div class="list-item rank-row' + (x.memberId === S.me ? ' me' : '') + '"><div class="rank-no">' + (medal[x.rank] || x.rank + '位') + '</div>' +
+      '<div class="main"><div class="title">' + esc(x.name) + (x.memberId === S.me ? ' <span class="badge ok">自分</span>' : '') + '</div>' +
+      (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>' + v + '</div>';
+  }).join('') || '<p class="empty">' + (kind === 'streak' ? 'まだだれも最後までやっていません' : (S.rkPeriod === 'week' ? '今週' : '今月') + 'はまだだれもやっていません') + '</p>';
+}
+function pickRkKind(k){ S.rkKind = k; renderRanking(); }
+function pickRkPeriod(p){ S.rkPeriod = p; renderRanking(); }
+
 function pickAnMember(id){ S.anMember = id; renderAnalysis(); }
 function pickAnDays(d){ S.anDays = d; renderAnalysis(); }
 
@@ -2299,11 +2403,22 @@ function renderSettings(){
       S.routines.map(routineItem_).join('') + '</div></div>';
 
     html += '<div class="card"><div class="card-head"><h2>交換先</h2><button class="btn tiny primary" onclick="editReward(\'\')">＋ 追加</button></div><div class="list">' +
-      S.rewards.map(function(w){
+      S.rewards.filter(function(w){ return w.kind !== 'catalog'; }).map(function(w){
         return '<div class="list-item"><div class="main"><div class="title">' + esc(w.name) + (w.active ? '' : ' <span class="badge gray">停止中</span>') + '</div>' +
           '<div class="sub">貯金1分 → ' + fmtNum(w.perMin) + esc(w.unit) + '</div></div>' +
           '<div class="actions"><button class="btn tiny" onclick="editReward(\'' + w.id + '\')">編集</button></div></div>';
       }).join('') + '</div></div>';
+
+    const catalog = S.rewards.filter(function(w){ return w.kind === 'catalog'; });
+    html += '<div class="card"><div class="card-head"><h2>🎁 ごほうびカタログ</h2><button class="btn tiny primary" onclick="editCatalog(\'\')">＋ 追加</button></div>' +
+      '<p class="muted">おやつ1個＝20分 のように、決まった値段で交換できるもの。1週間の回数や残りの数も決められます。</p><div class="list">' +
+      (catalog.map(function(w){
+        const sub = [w.priceMin + '分', w.weekLimit ? '1人1週間に' + w.weekLimit + '回まで' : '', w.stockLeft == null ? '' : 'のこり' + w.stockLeft + '個'];
+        return '<div class="list-item"><div class="main"><div class="title">' + esc(w.name) + (w.active ? '' : ' <span class="badge gray">停止中</span>') +
+          (w.stockLeft === 0 ? ' <span class="badge ng">売り切れ</span>' : '') + '</div>' +
+          '<div class="sub">' + sub.filter(Boolean).join('・') + '</div></div>' +
+          '<div class="actions"><button class="btn tiny" onclick="editCatalog(\'' + w.id + '\')">編集</button></div></div>';
+      }).join('') || '<p class="empty">まだありません</p>') + '</div></div>';
 
     html += '<div class="card"><div class="card-head"><h2>メンバー</h2><button class="btn tiny primary" onclick="editMember(\'\')">＋ 追加</button></div><div class="list">' +
       S.members.map(function(m){
@@ -2844,6 +2959,28 @@ function editReward(id){
     onOk: function(){
       return saveSetting_('saveReward', { rewardId: w.id, name: val('rwName'), perMin: Number(val('rwPer')), unit: val('rwUnit'),
         order: Number(val('rwOrder')), active: document.getElementById('rwActive').checked });
+    }
+  });
+}
+
+function editCatalog(id){
+  const w = id ? S.rewards.filter(function(x){ return x.id === id; })[0]
+               : { id: '', name: '', priceMin: 20, weekLimit: 0, stockLeft: null, order: S.rewards.length + 1, active: true };
+  openModal({
+    title: id ? 'ごほうびを編集' : 'ごほうびを追加',
+    body: '<div class="form">' +
+      '<label>名前<input type="text" id="ctName" value="' + esc(w.name) + '" placeholder="例：🍦 アイス"></label>' +
+      '<label>値段（分）<input type="number" id="ctPrice" min="1" max="6000" inputmode="numeric" value="' + w.priceMin + '"></label>' +
+      '<label>1人1週間に何回まで（空＝上限なし）<input type="number" id="ctWeek" min="0" max="99" inputmode="numeric" value="' + (w.weekLimit || '') + '"></label>' +
+      '<label>のこりの数（空＝限りなし）<input type="number" id="ctStock" min="0" max="9999" inputmode="numeric" value="' + (w.stockLeft == null ? '' : w.stockLeft) + '"></label>' +
+      '<label>表示順<input type="number" id="ctOrder" value="' + w.order + '"></label>' +
+      '<label class="inline"><input type="checkbox" id="ctActive"' + (w.active ? ' checked' : '') + '> 使う</label>' +
+      '<p class="muted">のこりの数は、交換が申請されるたびに1つへります（却下・取消で戻ります）。補充するときは、ここで数を入れなおしてね。</p></div>',
+    ok: '保存',
+    onOk: function(){
+      return saveSetting_('saveReward', { rewardId: w.id, kind: 'catalog', name: val('ctName'), priceMin: Number(val('ctPrice')),
+        weekLimit: Number(val('ctWeek')) || 0, stockLeft: val('ctStock') === '' ? null : Number(val('ctStock')),
+        order: Number(val('ctOrder')), active: document.getElementById('ctActive').checked });
     }
   });
 }
